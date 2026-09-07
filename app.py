@@ -41,21 +41,28 @@ HERE = Path(__file__).resolve().parent
 SAMPLE_FILE = HERE / "sample_vocab.csv"
 PROGRESS_FILE = HERE / "progress.json"
 
-CANON_COLUMNS = ["word", "meaning", "pos", "example", "example_zh", "note", "tags"]
+CANON_COLUMNS = ["word", "meaning", "pos", "example", "example_zh",
+                 "collocation", "note", "tags"]
 REQUIRED_COLUMNS = ("word", "meaning")
 
 COLUMN_ALIASES = {
     "word": ["word", "單字", "英文", "英文單字", "vocabulary", "vocab", "term", "en"],
+    # 「詞性與定義」這種合成欄先歸到 meaning，再由 split_pos_meaning() 把詞性拆出來
     "meaning": ["meaning", "中文", "中文意思", "中文解釋", "中文翻譯", "中文釋義",
                 "意思", "解釋", "釋義", "字義", "翻譯", "中譯", "定義",
+                "詞性與定義", "詞性定義", "定義與詞性", "詞性及定義",
                 "definition", "zh", "chinese"],
     "pos": ["pos", "詞性", "partofspeech", "part_of_speech"],
-    "example": ["example", "例句", "英文例句", "sentence", "examplesentence", "用法"],
+    "example": ["example", "例句", "英文例句", "sentence", "examplesentence", "用法",
+                "實用例句及中譯", "實用例句與中譯", "例句及中譯", "例句與中譯", "實用例句"],
+    "collocation": ["collocation", "collocations", "常見搭配詞", "搭配詞", "常用搭配",
+                    "常見搭配", "搭配用法", "片語"],
     "example_zh": ["example_zh", "例句翻譯", "例句中文", "中文例句", "sentence_zh"],
     # 「標籤 / 備註」這種合成欄先歸到 note，再由 split_tag_prefix() 把【】裡的標籤拆出來
     "note": ["note", "notes", "備註", "註記", "說明", "筆記", "remark", "熟詞偏義", "陷阱",
              "標籤備註", "備註標籤", "標籤說明", "分類備註"],
-    "tags": ["tags", "tag", "標籤", "分類", "類別", "category", "主題", "level", "程度"],
+    "tags": ["tags", "tag", "標籤", "分類", "類別", "category", "主題", "level", "程度",
+             "日期學習主題", "學習主題", "日期主題", "單元", "課次"],
 }
 TRICKY_KEYWORDS = ("熟詞偏義", "偏義", "陷阱", "tricky", "trap")
 
@@ -80,6 +87,20 @@ BLANK = "＿＿＿＿＿"
 def esc(text) -> str:
     """單字庫內容是使用者自己填的，插進 HTML 前一律轉義。"""
     return html.escape(str(text), quote=False)
+
+
+def short_tag(tag, limit: int = 18) -> str:
+    """標籤可能很長（例如「2026-08-23 每日單字（… 第 01 集 Occupations 職業）」）。
+
+    優先取括號裡的主題，再取破折號後的段落，最後才截斷。完整內容留在 tooltip。
+    """
+    t = str(tag).strip()
+    m = re.search(r"[（(]([^）)]+)[）)]\s*$", t)
+    if m:
+        t = m.group(1).strip()
+    if len(t) > limit and " - " in t:
+        t = t.rsplit(" - ", 1)[-1].strip()
+    return t if len(t) <= limit else t[:limit].rstrip() + "…"
 
 
 st.set_page_config(page_title=APP_TITLE, page_icon="📘", layout="centered",
@@ -146,6 +167,37 @@ def split_tag_prefix(note: str):
     return m.group(1).strip(), s[m.end():].strip()
 
 
+POS_PREFIX_RE = re.compile(r"^[（(]([^）)]{1,24})[）)]\s*(.+)$", re.S)
+
+
+def split_pos_meaning(meaning: str):
+    """把「(v./n.) 遞交、投標」拆成 (詞性, 定義)。沒有前綴就回傳 ("", 原文)。"""
+    s = str(meaning).strip()
+    m = POS_PREFIX_RE.match(s)
+    if not m:
+        return "", s
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def merge_spilled_columns(raw: pd.DataFrame) -> pd.DataFrame:
+    """把被逗號拆到隔壁儲存格的內容接回原欄。
+
+    試算表若用過「資料剖析成資料行」，長例句會被逗號切開散進 G、H 欄，
+    匯出成 CSV 就是一堆 "Unnamed: N"。以 ", " 接回去即可還原原句。
+    """
+    out, last_named = raw.copy(), None
+    for col in list(raw.columns):
+        if str(col).startswith("Unnamed:") and last_named is not None:
+            extra = out[col].fillna("").astype(str).str.strip()
+            base = out[last_named].fillna("").astype(str).str.strip()
+            out[last_named] = [f"{b}, {e}" if b and e else (b or e)
+                               for b, e in zip(base, extra)]
+            out = out.drop(columns=[col])
+        elif not str(col).startswith("Unnamed:"):
+            last_named = col
+    return out
+
+
 def split_bilingual(sentence: str):
     """把「English sentence. (中文翻譯。)」拆成 (英文句, 中文句)。
 
@@ -168,7 +220,7 @@ def split_bilingual(sentence: str):
 
 
 def normalize_frame(raw: pd.DataFrame) -> pd.DataFrame:
-    df = raw.copy()
+    df = merge_spilled_columns(raw)
     rename = {}
     for col in df.columns:
         target = ALIAS_LOOKUP.get(_canon(col))
@@ -191,6 +243,11 @@ def normalize_frame(raw: pd.DataFrame) -> pd.DataFrame:
 
     for col in CANON_COLUMNS:
         df[col] = df[col].fillna("").astype(str).str.strip()
+
+    # 定義開頭若有「(v./n.)」，把詞性拆出來；已有詞性欄者不動
+    pm = df["meaning"].apply(split_pos_meaning)
+    df["pos"] = [p if p and not old else old for (p, _), old in zip(pm, df["pos"])]
+    df["meaning"] = [body for _, body in pm]
 
     # 詞性可能寫成 "(n.)"，去掉外層括號，顯示時才不會變成「（(n.)）」
     df["pos"] = df["pos"].str.strip().str.strip("()（）").str.strip()
@@ -461,6 +518,7 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
     q = {
         "word": row["word"], "meaning": row["meaning"], "pos": row["pos"],
         "example": row["example"], "example_zh": row["example_zh"],
+        "collocation": row["collocation"],
         "note": row["note"], "tags": row["tags"], "tricky": bool(row["tricky"]),
         "kind": kind, "sub": "",
     }
@@ -722,13 +780,14 @@ def render_details(q: dict) -> None:
         st.markdown(f"📖 {sent}")
     if q["example_zh"]:
         st.caption(q["example_zh"])
-    if q["note"] or q["tags"]:
-        if q["tricky"]:
-            st.warning(f"⚠️ 熟詞偏義：{q['note']}")
-        elif q["tags"]:
-            st.info(f"💡 【{q['tags']}】{q['note']}")
-        else:
-            st.info(f"💡 {q['note']}")
+    if q.get("collocation"):
+        st.markdown(f"🔗 **常見搭配**　{q['collocation']}")
+    if q["tricky"] and q["note"]:
+        st.warning(f"⚠️ 熟詞偏義：{q['note']}")
+    elif q["tricky"]:
+        st.warning("⚠️ 這是熟詞偏義字，注意它在商務語境的用法")
+    elif q["note"]:
+        st.info(f"💡 {q['note']}")
 
 
 def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
@@ -742,7 +801,8 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
         if q["tricky"]:
             pills += "<span class='pill pill-tricky'>熟詞偏義</span>"
         elif q["tags"]:
-            pills += f"<span class='pill'>{esc(q['tags'])}</span>"
+            pills += (f"<span class='pill' title='{esc(q['tags'])}'>"
+                      f"{esc(short_tag(q['tags']))}</span>")
     if cfg["hint"] and q["pos"]:
         pills += f"<span class='pill'>{esc(q['pos'])}</span>"
 
@@ -829,7 +889,9 @@ def render_result(cfg: dict, questions: list) -> None:
                 render_audio(q, cfg)
         rows = [{"word": q["word"], "meaning": q["meaning"], "pos": q["pos"],
                  "your_answer": answers.get(i, {}).get("user", ""), "answer": q["answer"],
-                 "example": q["example"], "note": q["note"]} for i, q in wrong]
+                 "collocation": q.get("collocation", ""),
+                 "example": q["example"], "example_zh": q["example_zh"],
+                 "note": q["note"], "tags": q["tags"]} for i, q in wrong]
         st.download_button(
             "⬇️ 下載錯題 CSV",
             pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
