@@ -191,7 +191,32 @@ https://你的app.streamlit.app/?u=小明
 純粹是避免共用時資料混在一起。
 
 側邊欄的「💾 備份／還原學習紀錄」可以下載自己的 JSON、也能上傳還原。
-雲端容器重新部署或休眠後紀錄會清空，在意的話請定期下載備份。
+
+### 讓紀錄永久保存（選用：Supabase）
+
+不設定的話，紀錄只存在 Streamlit Cloud 的暫存檔，**每次重新部署或休眠都會清空**。
+在 secrets 加上 Supabase 金鑰就會改存到雲端資料庫，永久保存：
+
+```toml
+[supabase]
+url = "https://xxxxx.supabase.co"
+key = "你的 anon public key"
+```
+
+資料表用這段 SQL 建立（Supabase → SQL Editor）：
+
+```sql
+create table if not exists vocab_progress (
+  username   text primary key,
+  data       jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+alter table vocab_progress enable row level security;
+create policy "app access" on vocab_progress for all using (true) with check (true);
+```
+
+側邊欄會顯示目前的儲存狀態（☁️ 雲端／📁 暫存檔／⚠️ 寫入失敗）。
+資料庫連不上時會自動退回暫存檔，作答不會中斷。
 
 **其他**
 

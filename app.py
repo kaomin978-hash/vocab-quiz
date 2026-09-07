@@ -31,6 +31,7 @@ import string
 from pathlib import Path
 
 import pandas as pd
+import requests
 import streamlit as st
 
 # --------------------------------------------------------------------------
@@ -394,6 +395,76 @@ def tts_mp3(text: str, tld: str, slow: bool = False):
 DEFAULT_USER = "我"
 NEW_USER_CHOICE = "➕ 新增使用者…"
 
+# --- Supabase（可選）------------------------------------------------------
+# secrets 有設 [supabase] url/key 就把紀錄存到雲端資料庫，永久保存；
+# 沒設就退回本機檔案（Streamlit Cloud 重新部署或休眠後會清空）。
+DB_TABLE = "vocab_progress"
+
+
+def supabase_conf():
+    try:
+        conf = st.secrets.get("supabase", None)
+        if conf:
+            url, key = str(conf.get("url", "")).strip(), str(conf.get("key", "")).strip()
+            if url and key:
+                return url.rstrip("/"), key
+    except Exception:
+        pass
+    return None
+
+
+def _db_headers(key: str) -> dict:
+    return {"apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"}
+
+
+def db_load(user: str):
+    """讀取雲端紀錄。沒設定或讀取失敗回傳 None，呼叫端會退回本機檔案。"""
+    conf = supabase_conf()
+    if not conf:
+        return None
+    url, key = conf
+    try:
+        r = requests.get(f"{url}/rest/v1/{DB_TABLE}",
+                         params={"username": f"eq.{user}", "select": "data"},
+                         headers=_db_headers(key), timeout=10)
+        r.raise_for_status()
+        rows = r.json()
+        return dict(rows[0]["data"]) if rows else {}
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def db_save(user: str, data: dict) -> bool:
+    conf = supabase_conf()
+    if not conf:
+        return False
+    url, key = conf
+    try:
+        r = requests.post(
+            f"{url}/rest/v1/{DB_TABLE}", params={"on_conflict": "username"},
+            headers={**_db_headers(key), "Prefer": "resolution=merge-duplicates"},
+            json={"username": user, "data": data}, timeout=10,
+        )
+        r.raise_for_status()
+        return True
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def db_users() -> list:
+    conf = supabase_conf()
+    if not conf:
+        return []
+    url, key = conf
+    try:
+        r = requests.get(f"{url}/rest/v1/{DB_TABLE}", params={"select": "username"},
+                         headers=_db_headers(key), timeout=10)
+        r.raise_for_status()
+        return [str(row["username"]) for row in r.json() if row.get("username")]
+    except Exception:  # noqa: BLE001
+        return []
+
 
 def user_slug(name: str) -> str:
     """使用者名稱轉成安全的檔名。"""
@@ -406,15 +477,17 @@ def progress_path(user: str) -> Path:
 
 
 def known_users() -> list:
-    """從已存在的紀錄檔列出使用者。"""
-    users = []
+    """列出已有紀錄的使用者（雲端優先，再補上本機檔案）。"""
+    users = list(db_users())
     try:
         for f in sorted(PROGRESS_DIR.glob("*.json")):
             try:
                 data = json.loads(f.read_text(encoding="utf-8"))
-                users.append(str(data.get("name") or f.stem))
+                name = str(data.get("name") or f.stem)
             except Exception:
-                users.append(f.stem)
+                name = f.stem
+            if name not in users:
+                users.append(name)
     except Exception:
         pass
     if DEFAULT_USER not in users:
@@ -455,28 +528,40 @@ def load_progress() -> dict:
     if st.session_state.get("progress_user") == user and "progress" in st.session_state:
         return st.session_state.progress
 
-    data = {"name": user, "history": {}, "wrong": {}}
-    try:
-        f = progress_path(user)
-        if f.exists():
-            loaded = json.loads(f.read_text(encoding="utf-8"))
-            data = {"name": loaded.get("name", user),
-                    "history": loaded.get("history", {}),
-                    "wrong": loaded.get("wrong", {})}
-    except Exception:
-        pass
+    data, loaded = {"name": user, "history": {}, "wrong": {}}, None
+
+    remote = db_load(user)                 # 有設定 Supabase 就以雲端為準
+    if remote is not None:
+        loaded = remote
+        st.session_state.storage = "cloud"
+    else:
+        st.session_state.storage = "local"
+        try:
+            f = progress_path(user)
+            if f.exists():
+                loaded = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    if loaded:
+        data = {"name": loaded.get("name", user),
+                "history": dict(loaded.get("history", {})),
+                "wrong": dict(loaded.get("wrong", {}))}
     st.session_state.progress = data
     st.session_state.progress_user = user
     return data
 
 
 def save_progress() -> None:
-    try:
+    user, data = current_user(), st.session_state.progress
+    if db_save(user, data):
+        st.session_state.storage = "cloud"
+    elif supabase_conf():
+        st.session_state.storage = "error"   # 有設定卻寫不進去，要讓使用者知道
+    try:                                     # 本機檔案照寫，當作離線保險
         PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
-        progress_path(current_user()).write_text(
-            json.dumps(st.session_state.progress, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        progress_path(user).write_text(
+            json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass  # 雲端檔案系統唯讀時忽略
 
@@ -763,8 +848,15 @@ def sidebar() -> dict:
     st.sidebar.caption(f"👤 {user}　｜　單字庫 {len(df)} 字（{source_label}）"
                        f"　｜　錯題本 {len(prog['wrong'])} 字")
 
+    storage = st.session_state.get("storage", "local")
+    st.sidebar.caption({
+        "cloud": "☁️ 紀錄存在雲端資料庫，重新部署也不會消失",
+        "local": "📁 紀錄存在伺服器暫存檔，重新部署或休眠後會清空",
+        "error": "⚠️ 雲端資料庫寫入失敗，目前只存在暫存檔",
+    }[storage])
+
     with st.sidebar.expander("💾 備份／還原學習紀錄"):
-        st.caption("雲端容器重新部署或休眠後紀錄會清空，重要的話請自行下載備份。")
+        st.caption("換裝置或想留存時可下載一份；還原會覆蓋目前紀錄。")
         st.download_button(
             "⬇️ 下載", json.dumps(prog, ensure_ascii=False, indent=2).encode("utf-8"),
             file_name=f"progress_{user_slug(user)}.json", mime="application/json",
