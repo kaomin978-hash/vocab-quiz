@@ -42,7 +42,7 @@ SAMPLE_FILE = HERE / "sample_vocab.csv"
 PROGRESS_DIR = HERE / "progress"          # 每位使用者一個 json
 
 CANON_COLUMNS = ["word", "meaning", "pos", "example", "example_zh",
-                 "collocation", "note", "tags"]
+                 "collocation", "etymology", "note", "tags"]
 REQUIRED_COLUMNS = ("word", "meaning")
 
 COLUMN_ALIASES = {
@@ -57,6 +57,8 @@ COLUMN_ALIASES = {
                 "實用例句及中譯", "實用例句與中譯", "例句及中譯", "例句與中譯", "實用例句"],
     "collocation": ["collocation", "collocations", "常見搭配詞", "搭配詞", "常用搭配",
                     "常見搭配", "搭配用法", "片語"],
+    "etymology": ["etymology", "字首字根拆解", "字首字根", "字根拆解", "字根字首",
+                  "字源", "詞源", "構詞", "拆解", "roots", "wordparts"],
     "example_zh": ["example_zh", "例句翻譯", "例句中文", "中文例句", "sentence_zh"],
     # 「標籤 / 備註」這種合成欄先歸到 note，再由 split_tag_prefix() 把【】裡的標籤拆出來
     "note": ["note", "notes", "備註", "註記", "說明", "筆記", "remark", "熟詞偏義", "陷阱",
@@ -583,7 +585,7 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
     q = {
         "word": row["word"], "meaning": row["meaning"], "pos": row["pos"],
         "example": row["example"], "example_zh": row["example_zh"],
-        "collocation": row["collocation"],
+        "collocation": row["collocation"], "etymology": row["etymology"],
         "note": row["note"], "tags": row["tags"], "tricky": bool(row["tricky"]),
         "kind": kind, "sub": "",
     }
@@ -888,6 +890,8 @@ def render_audio(q: dict, cfg: dict) -> None:
 
 
 def render_details(q: dict) -> None:
+    if q.get("etymology"):
+        st.markdown(f"🧩 **字首字根**　{q['etymology']}")
     if q["example"]:
         sent = q["example"]
         if q.get("surface"):
@@ -1005,6 +1009,7 @@ def render_result(cfg: dict, questions: list) -> None:
         rows = [{"word": q["word"], "meaning": q["meaning"], "pos": q["pos"],
                  "your_answer": answers.get(i, {}).get("user", ""), "answer": q["answer"],
                  "collocation": q.get("collocation", ""),
+                 "etymology": q.get("etymology", ""),
                  "example": q["example"], "example_zh": q["example_zh"],
                  "note": q["note"], "tags": q["tags"]} for i, q in wrong]
         st.download_button(
