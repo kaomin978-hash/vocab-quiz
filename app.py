@@ -915,10 +915,10 @@ def sidebar() -> dict:
             else:
                 st.write(f"Project URL：`{conf[0]}`")
                 st.write(f"金鑰：`{conf[1][:18]}…`（共 {len(conf[1])} 字）")
-                err = st.session_state.get("db_error")
-                if err:
-                    st.error(err)
-                    st.info(db_error_hint(err))
+                db_err = st.session_state.get("db_error")   # 別叫 err，會蓋掉單字庫的錯誤
+                if db_err:
+                    st.error(db_err)
+                    st.info(db_error_hint(db_err))
                 else:
                     st.caption("設定讀到了，尚未發生錯誤 —— 作答一題後再看這裡。")
             if st.button("🔄 重新測試連線", use_container_width=True):
