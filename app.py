@@ -269,6 +269,27 @@ def load_sample() -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------
+# 發音（Google TTS）。多益聽力四種腔調都會考，所以口音可切換。
+# --------------------------------------------------------------------------
+ACCENT_TLD = {"美式 🇺🇸": "com", "英式 🇬🇧": "co.uk", "澳洲 🇦🇺": "com.au", "加拿大 🇨🇦": "ca"}
+
+
+@st.cache_data(ttl=86400, max_entries=800, show_spinner=False)
+def tts_mp3(text: str, tld: str, slow: bool = False):
+    """把英文轉成 mp3。失敗回傳 None —— 發音只是加分項，不該讓整個 App 掛掉。"""
+    text = str(text).strip()
+    if not text:
+        return None
+    try:
+        from gtts import gTTS
+        buf = io.BytesIO()
+        gTTS(text=text, lang="en", tld=tld, slow=slow).write_to_fp(buf)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001  網路不通、套件沒裝、服務改版都算
+        return None
+
+
+# --------------------------------------------------------------------------
 # 學習紀錄（寫本機檔案，best-effort；雲端容器重啟會清空，可下載備份）
 # --------------------------------------------------------------------------
 def load_progress() -> dict:
@@ -517,6 +538,16 @@ def sidebar() -> dict:
     hint = st.sidebar.toggle("顯示提示（詞性／首字母）", value=False)
 
     st.sidebar.divider()
+    st.sidebar.markdown("**🔊 發音**")
+    audio = st.sidebar.toggle("答完後可播放單字與例句", value=True)
+    accent = st.sidebar.selectbox("口音", list(ACCENT_TLD.keys()), index=0,
+                                  disabled=not audio,
+                                  help="多益聽力會出現美、英、澳、加四種腔調")
+    autoplay = st.sidebar.toggle("答完自動播放單字", value=False, disabled=not audio,
+                                 help="手機瀏覽器可能擋自動播放，擋掉就手動按播放鍵")
+    slow = st.sidebar.toggle("附慢速版（適合跟讀）", value=False, disabled=not audio)
+
+    st.sidebar.divider()
     prog = load_progress()
     today = prog["history"].get(dt.date.today().isoformat(), {"total": 0, "correct": 0})
     c1, c2, c3 = st.sidebar.columns(3)
@@ -531,7 +562,8 @@ def sidebar() -> dict:
     )
 
     return {"df": df, "mode": mode, "n": n, "kinds": sorted(kinds), "hint": hint,
-            "error": err, "source": source_label}
+            "error": err, "source": source_label,
+            "audio": audio, "accent": accent, "autoplay": autoplay, "slow": slow}
 
 
 # --------------------------------------------------------------------------
@@ -606,6 +638,33 @@ def submit(idx: int, q: dict, user: str) -> None:
 # --------------------------------------------------------------------------
 # 畫面
 # --------------------------------------------------------------------------
+def render_audio(q: dict, cfg: dict) -> None:
+    """答完後播放單字與例句。慢速版另給一顆，適合跟讀。"""
+    if not cfg["audio"]:
+        return
+    tld = ACCENT_TLD.get(cfg["accent"], "com")
+    word_mp3 = tts_mp3(q["word"], tld)
+    sent_mp3 = tts_mp3(q["example"], tld) if q["example"] else None
+    if word_mp3 is None and sent_mp3 is None:
+        st.caption("🔇 發音服務暫時連不上（不影響作答）")
+        return
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.caption(f"🔊 單字　{q['word']}")
+        if word_mp3:
+            st.audio(word_mp3, format="audio/mp3", autoplay=cfg["autoplay"])
+        if cfg["slow"]:
+            slow_mp3 = tts_mp3(q["word"], tld, True)
+            if slow_mp3:
+                st.caption("🐢 慢速")
+                st.audio(slow_mp3, format="audio/mp3")
+    with c2:
+        if sent_mp3:
+            st.caption("🔊 例句")
+            st.audio(sent_mp3, format="audio/mp3")
+
+
 def render_details(q: dict) -> None:
     if q["example"]:
         sent = q["example"]
@@ -690,13 +749,14 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
         else:                                    # 英→中：正解是中文，補上對應的英文字
             st.error(f"正解：**{q['answer']}**　—　**{q['word']}**（{q['pos'] or '—'}）")
         render_details(q)
+        render_audio(q, cfg)
         label = "下一題 ▶" if idx + 1 < total else "看結果 🎉"
         if st.button(label, type="primary", use_container_width=True, key=f"next_{idx}"):
             st.session_state.idx = idx + 1
             st.rerun()
 
 
-def render_result(questions: list) -> None:
+def render_result(cfg: dict, questions: list) -> None:
     answers = st.session_state.answers
     total = len(questions)
     correct = sum(1 for a in answers.values() if a["ok"])
@@ -717,6 +777,7 @@ def render_result(questions: list) -> None:
                 st.caption(f"{KIND_LABELS[q['kind']]}　你的答案：{answers.get(i, {}).get('user', '—')}"
                            f"　／　正解：{q['answer']}")
                 render_details(q)
+                render_audio(q, cfg)
         rows = [{"word": q["word"], "meaning": q["meaning"], "pos": q["pos"],
                  "your_answer": answers.get(i, {}).get("user", ""), "answer": q["answer"],
                  "example": q["example"], "note": q["note"]} for i, q in wrong]
@@ -762,7 +823,7 @@ def main() -> None:
 
     idx = st.session_state.idx
     if idx >= len(questions):
-        render_result(questions)
+        render_result(cfg, questions)
     else:
         render_question(cfg, questions[idx], idx, len(questions))
         st.divider()
