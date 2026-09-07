@@ -268,6 +268,46 @@ def load_sample() -> pd.DataFrame:
     return normalize_frame(pd.read_csv(SAMPLE_FILE, encoding="utf-8"))
 
 
+@st.cache_data(ttl=600, show_spinner="讀取多個單字庫中…")
+def load_many(urls: tuple) -> pd.DataFrame:
+    """合併多個單字庫，重複的字以先出現者為準。"""
+    frames, first_err = [], None
+    for u in urls:
+        try:
+            frames.append(load_from_url(u))
+        except Exception as e:  # noqa: BLE001
+            first_err = first_err or e
+    if not frames:
+        raise first_err or ValueError("沒有可用的單字庫")
+    merged = pd.concat(frames, ignore_index=True)
+    return merged.drop_duplicates(subset=["word"], keep="first").reset_index(drop=True)
+
+
+MERGED_CHOICE = "🔗 全部合併"
+CUSTOM_CHOICE = "✏️ 自訂 Google Sheet 連結"
+UPLOAD_CHOICE = "📁 上傳檔案"
+SAMPLE_CHOICE = "📚 內建範例"
+
+
+def named_sources() -> dict:
+    """secrets 裡預先設定好的單字庫：[vocab_sources] 名稱 = 網址。"""
+    out = {}
+    try:
+        raw = st.secrets.get("vocab_sources", None)
+        if raw:
+            out = {str(k): str(v) for k, v in dict(raw).items() if str(v).strip()}
+    except Exception:
+        pass
+    if not out:                       # 相容舊的單一 sheet_url 設定
+        try:
+            single = str(st.secrets.get("sheet_url", "")).strip()
+            if single:
+                out = {"我的單字庫": single}
+        except Exception:
+            pass
+    return out
+
+
 # --------------------------------------------------------------------------
 # 發音（Google TTS）。多益聽力四種腔調都會考，所以口音可切換。
 # --------------------------------------------------------------------------
@@ -487,20 +527,29 @@ def filter_by_mode(df: pd.DataFrame, mode: str):
 def sidebar() -> dict:
     st.sidebar.header("⚙️ 設定")
 
-    default_url = ""
-    try:
-        default_url = st.secrets.get("sheet_url", "")
-    except Exception:
-        pass
+    named = named_sources()
+    choices = list(named)
+    if len(named) > 1:
+        choices.append(MERGED_CHOICE)
+    choices += [CUSTOM_CHOICE, UPLOAD_CHOICE, SAMPLE_CHOICE]
 
-    source = st.sidebar.radio("單字庫來源",
-                              ["Google Sheet 連結", "上傳檔案", "內建範例"],
-                              index=0 if default_url else 2)
+    source = st.sidebar.selectbox("單字庫", choices, index=0, key="source_pick",
+                                  help="可在 secrets 的 [vocab_sources] 設定多個單字庫隨時切換")
 
     df, err = None, None
-    if source == "Google Sheet 連結":
+    if source in named:
+        try:
+            df = load_from_url(named[source])
+        except Exception as e:  # noqa: BLE001
+            err = explain_load_error(e, named[source])
+    elif source == MERGED_CHOICE:
+        try:
+            df = load_many(tuple(named.values()))
+        except Exception as e:  # noqa: BLE001
+            err = explain_load_error(e, "")
+    elif source == CUSTOM_CHOICE:
         url = st.sidebar.text_input(
-            "貼上公開的 Google Sheet 連結", value=default_url,
+            "貼上公開的 Google Sheet 連結",
             placeholder="https://docs.google.com/spreadsheets/d/.../edit#gid=0",
             help="Sheet 需設為「知道連結的任何人皆可檢視」。一般編輯網址會自動轉成 CSV 匯出網址。",
         )
@@ -511,7 +560,7 @@ def sidebar() -> dict:
                 err = explain_load_error(e, url)
         else:
             st.sidebar.caption("尚未填連結，先用內建範例。")
-    elif source == "上傳檔案":
+    elif source == UPLOAD_CHOICE:
         up = st.sidebar.file_uploader("CSV 或 Excel", type=["csv", "xlsx", "xls", "xlsm"])
         if up is not None:
             try:
@@ -522,7 +571,7 @@ def sidebar() -> dict:
     if err:
         st.sidebar.error("單字庫讀取失敗，詳見主畫面。")
     if df is None:
-        df, source_label = load_sample(), "內建範例"
+        df, source_label = load_sample(), SAMPLE_CHOICE
     else:
         source_label = source
 

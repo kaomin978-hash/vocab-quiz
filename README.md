@@ -87,13 +87,26 @@ App 會自動把 `.../edit#gid=0` 轉成 `.../export?format=csv&gid=0`，不需�
 但單字庫一變動，當前這一回合會**重新抽題**（進度歸零）—— 所以建議做完一輪再更新 Sheet。
 已作答的統計與錯題本不受影響，那是分開記錄的。
 
-**想讓連結變成預設值**（免得每次貼），建立 `.streamlit/secrets.toml`：
+### 設定多個單字庫
+
+在 `.streamlit/secrets.toml` 裡登記，側邊欄就會出現下拉選單隨時切換：
 
 ```toml
-sheet_url = "https://docs.google.com/spreadsheets/d/你的ID/edit#gid=0"
+[vocab_sources]
+"不熟的字" = "https://docs.google.com/spreadsheets/d/AAA.../edit?gid=0#gid=0"
+"全部單字" = "https://docs.google.com/spreadsheets/d/BBB.../edit?gid=0#gid=0"
 ```
 
-（部署到雲端時，改在 Streamlit Cloud 的 **Settings → Secrets** 貼同一行。）
+登記兩個以上時，選單會多一個 **🔗 全部合併** —— 把所有單字庫併起來出題，
+重複的字以先出現者為準。單字庫越大，干擾選項的變化也越多。
+
+選單另外永遠附帶「✏️ 自訂連結」「📁 上傳檔案」「📚 內建範例」三個選項。
+完全沒設定 secrets 時會自動用內建範例，不會壞掉。
+
+**錯題本是跨單字庫共用的**（以單字本身為 key），所以在哪一個單字庫答錯都會累積，
+「錯題複習」模式只會考出現在當前單字庫裡的錯字。
+
+（部署到雲端時，把 `[vocab_sources]` 整段貼進 Streamlit Cloud 的 **Settings → Secrets**。）
 
 ---
 
