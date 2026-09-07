@@ -626,11 +626,17 @@ def render_details(q: dict) -> None:
 def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
     st.progress(idx / total, text=f"第 {idx + 1} / {total} 題")
 
+    answered = idx in st.session_state.answers
+
+    # 標籤答完才出現：先看到「熟詞偏義」等於先知道考的是冷門字義，會降低難度
     pills = f"<span class='pill'>{KIND_LABELS[q['kind']]}</span>"
-    if q["tricky"]:
-        pills += "<span class='pill pill-tricky'>熟詞偏義</span>"
+    if answered:
+        if q["tricky"]:
+            pills += "<span class='pill pill-tricky'>熟詞偏義</span>"
+        elif q["tags"]:
+            pills += f"<span class='pill'>{esc(q['tags'])}</span>"
     if cfg["hint"] and q["pos"]:
-        pills += f"<span class='pill'>{q['pos']}</span>"
+        pills += f"<span class='pill'>{esc(q['pos'])}</span>"
 
     if q["kind"] in ("cloze", "spell"):
         body = (f"{pills}<div class='q-sent'>{esc(q['sentence'])}</div>"
@@ -639,8 +645,6 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
         body = (f"{pills}<div class='q-prompt'>{esc(q['prompt'])}</div>"
                 f"<div class='q-meta'>{esc(q['sub'])}</div>")
     st.markdown(f"<div class='q-card'>{body}</div>", unsafe_allow_html=True)
-
-    answered = idx in st.session_state.answers
 
     if q["kind"] == "spell":
         if not answered:
