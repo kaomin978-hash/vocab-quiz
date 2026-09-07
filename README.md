@@ -8,7 +8,7 @@
 ├── sample_vocab.csv    ← 內建範例單字庫（47 字，含 17 個熟詞偏義）
 ├── requirements.txt
 ├── .streamlit/config.toml
-└── progress.json       ← 學習紀錄（自動產生，本機執行才會保留）
+└── progress/           ← 學習紀錄，每位使用者一個 json（自動產生）
 ```
 
 ---
@@ -125,13 +125,13 @@ App 會自動把 `.../edit#gid=0` 轉成 `.../export?format=csv&gid=0`，不需�
 
 ## 4. 部署到 Streamlit Community Cloud（免費）
 
-1. 把這個資料夾推上 GitHub（**`progress.json` 不要推**，見 `.gitignore`）。
+1. 把這個資料夾推上 GitHub（**`progress/` 與 `secrets.toml` 不要推**，見 `.gitignore`）。
 2. 到 <https://share.streamlit.io> → **New app** → 選 repo、branch，Main file 填 `app.py` → Deploy。
 3. 約一分鐘後拿到 `https://你的名字-單字app.streamlit.app` 這樣的網址。
 4. 手機打開該網址 → **加到主畫面**（iOS Safari 的分享鍵 / Android Chrome 的選單），
    之後點桌面圖示就是全螢幕開啟，跟原生 App 幾乎一樣。
 
-> ⚠️ 雲端容器的檔案系統是暫時的，`progress.json` 在重新部署／休眠後會清空。
+> ⚠️ 雲端容器的檔案系統是暫時的，`progress/` 在重新部署／休眠後會清空。
 > 想長期保留紀錄，用側邊欄的「⬇️ 下載學習紀錄 JSON」自行備份即可。
 > 若 Sheet 想保持非公開，就得改用 Google Sheets API + service account（把金鑰放進 Secrets），
 > 但公開唯讀的 Sheet 已足夠應付單字庫這種用途，且省掉一整包設定。
@@ -175,6 +175,23 @@ App 會自動把 `.../edit#gid=0` 轉成 `.../export?format=csv&gid=0`，不需�
 
 發音服務連不上時只會顯示一行提示，不影響作答。
 
+**👤 多使用者**
+
+側邊欄最上方可切換使用者，**每個人的錯題本、今日統計、連續天數完全分開**，
+各自存成 `progress/<名字>.json`。
+
+身分記在網址參數，所以每個人把自己的網址加到主畫面就會固定身分：
+
+```
+https://你的app.streamlit.app/?u=小明
+```
+
+這**不是登入驗證** —— 任何人都能在選單裡選別人的名字看到對方紀錄，
+純粹是避免共用時資料混在一起。
+
+側邊欄的「💾 備份／還原學習紀錄」可以下載自己的 JSON、也能上傳還原。
+雲端容器重新部署或休眠後紀錄會清空，在意的話請定期下載備份。
+
 **其他**
 
 - 標籤（熟詞偏義／分類）**答完才顯示** —— 答題前看到等於先知道考點，會降低難度。
@@ -195,5 +212,6 @@ App 會自動把 `.../edit#gid=0` 轉成 `.../export?format=csv&gid=0`，不需�
 | 熟詞偏義的判定關鍵字 | `TRICKY_KEYWORDS` |
 | 新增欄位別名（例如你的表頭叫「英文字」） | `COLUMN_ALIASES` |
 | 錯題畢業門檻（預設連對 2 次） | `record_result()` 裡的 `entry["streak"] >= 2` |
+| 預設使用者名稱 | `DEFAULT_USER` |
 | 快取時間（預設 10 分鐘） | `@st.cache_data(ttl=600, ...)` |
 | 發音口音選項 | `ACCENT_TLD` |

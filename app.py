@@ -39,7 +39,7 @@ import streamlit as st
 APP_TITLE = "每日單字測驗"
 HERE = Path(__file__).resolve().parent
 SAMPLE_FILE = HERE / "sample_vocab.csv"
-PROGRESS_FILE = HERE / "progress.json"
+PROGRESS_DIR = HERE / "progress"          # 每位使用者一個 json
 
 CANON_COLUMNS = ["word", "meaning", "pos", "example", "example_zh",
                  "collocation", "note", "tags"]
@@ -389,24 +389,89 @@ def tts_mp3(text: str, tld: str, slow: bool = False):
 # --------------------------------------------------------------------------
 # 學習紀錄（寫本機檔案，best-effort；雲端容器重啟會清空，可下載備份）
 # --------------------------------------------------------------------------
-def load_progress() -> dict:
-    if "progress" in st.session_state:
-        return st.session_state.progress
-    data = {"history": {}, "wrong": {}}
+DEFAULT_USER = "我"
+NEW_USER_CHOICE = "➕ 新增使用者…"
+
+
+def user_slug(name: str) -> str:
+    """使用者名稱轉成安全的檔名。"""
+    slug = re.sub(r"[^\w一-鿿-]", "_", str(name).strip())[:40]
+    return slug or "user"
+
+
+def progress_path(user: str) -> Path:
+    return PROGRESS_DIR / f"{user_slug(user)}.json"
+
+
+def known_users() -> list:
+    """從已存在的紀錄檔列出使用者。"""
+    users = []
     try:
-        if PROGRESS_FILE.exists():
-            data = json.loads(PROGRESS_FILE.read_text(encoding="utf-8"))
-            data.setdefault("history", {})
-            data.setdefault("wrong", {})
+        for f in sorted(PROGRESS_DIR.glob("*.json")):
+            try:
+                data = json.loads(f.read_text(encoding="utf-8"))
+                users.append(str(data.get("name") or f.stem))
+            except Exception:
+                users.append(f.stem)
+    except Exception:
+        pass
+    if DEFAULT_USER not in users:
+        users.insert(0, DEFAULT_USER)
+    return users
+
+
+def current_user() -> str:
+    """目前使用者。以網址參數 ?u= 為準，方便各自加到主畫面後保持身分。"""
+    if "user" not in st.session_state:
+        from_url = ""
+        try:
+            raw = st.query_params.get("u", "")
+            if isinstance(raw, (list, tuple)):      # 某些情境會回傳 list
+                raw = raw[0] if raw else ""
+            from_url = str(raw).strip()
+        except Exception:
+            pass
+        st.session_state.user = from_url or DEFAULT_USER
+    return st.session_state.user
+
+
+def switch_user(name: str) -> None:
+    name = str(name).strip() or DEFAULT_USER
+    if name == st.session_state.get("user"):
+        return
+    st.session_state.user = name
+    st.session_state.pop("progress", None)      # 換人就重讀紀錄
+    st.session_state.pop("progress_user", None)
+    try:
+        st.query_params["u"] = name
+    except Exception:
+        pass
+
+
+def load_progress() -> dict:
+    user = current_user()
+    if st.session_state.get("progress_user") == user and "progress" in st.session_state:
+        return st.session_state.progress
+
+    data = {"name": user, "history": {}, "wrong": {}}
+    try:
+        f = progress_path(user)
+        if f.exists():
+            loaded = json.loads(f.read_text(encoding="utf-8"))
+            data = {"name": loaded.get("name", user),
+                    "history": loaded.get("history", {}),
+                    "wrong": loaded.get("wrong", {})}
     except Exception:
         pass
     st.session_state.progress = data
+    st.session_state.progress_user = user
     return data
 
 
 def save_progress() -> None:
     try:
-        PROGRESS_FILE.write_text(
+        PROGRESS_DIR.mkdir(parents=True, exist_ok=True)
+        progress_path(current_user()).write_text(
             json.dumps(st.session_state.progress, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
@@ -582,8 +647,40 @@ def filter_by_mode(df: pd.DataFrame, mode: str):
 # --------------------------------------------------------------------------
 # 側邊欄
 # --------------------------------------------------------------------------
+def sidebar_user() -> str:
+    """使用者切換。純粹是紀錄分流，不是登入驗證。"""
+    user = current_user()
+    users = known_users()
+    for extra in st.session_state.get("extra_users", []):
+        if extra not in users:
+            users.append(extra)
+    if user not in users:
+        users.append(user)
+    options = users + [NEW_USER_CHOICE]
+
+    # key 綁定目前使用者：換人時等於換一個全新的 widget，選單自然跳到新使用者，
+    # 不會卡在「➕ 新增使用者…」而一直觸發 st.rerun()
+    pick = st.sidebar.selectbox("👤 使用者", options, index=options.index(user),
+                                key=f"user_pick::{user}",
+                                help="每個人的錯題本與統計分開記錄")
+
+    if pick == NEW_USER_CHOICE:
+        name = st.sidebar.text_input("新使用者名稱", key=f"new_user::{user}",
+                                     placeholder="例如：小明").strip()
+        if name and name != user:
+            st.session_state.setdefault("extra_users", []).append(name)
+            switch_user(name)
+            st.rerun()
+    elif pick != user:
+        switch_user(pick)
+        st.rerun()
+    return current_user()
+
+
 def sidebar() -> dict:
     st.sidebar.header("⚙️ 設定")
+    user = sidebar_user()
+    st.sidebar.divider()
 
     named = named_sources()
     choices = list(named)
@@ -661,15 +758,33 @@ def sidebar() -> dict:
     c1.metric("今日作答", today["total"])
     c2.metric("今日答對", today["correct"])
     c3.metric("連續天數", study_streak())
-    st.sidebar.caption(f"單字庫 {len(df)} 字（{source_label}）｜錯題本 {len(prog['wrong'])} 字")
-    st.sidebar.download_button(
-        "⬇️ 下載學習紀錄 JSON",
-        json.dumps(prog, ensure_ascii=False, indent=2).encode("utf-8"),
-        file_name="progress.json", mime="application/json", use_container_width=True,
-    )
+    st.sidebar.caption(f"👤 {user}　｜　單字庫 {len(df)} 字（{source_label}）"
+                       f"　｜　錯題本 {len(prog['wrong'])} 字")
+
+    with st.sidebar.expander("💾 備份／還原學習紀錄"):
+        st.caption("雲端容器重新部署或休眠後紀錄會清空，重要的話請自行下載備份。")
+        st.download_button(
+            "⬇️ 下載", json.dumps(prog, ensure_ascii=False, indent=2).encode("utf-8"),
+            file_name=f"progress_{user_slug(user)}.json", mime="application/json",
+            use_container_width=True,
+        )
+        up = st.file_uploader("⬆️ 還原（會覆蓋目前紀錄）", type=["json"],
+                              key=f"restore_{user_slug(user)}")
+        if up is not None:
+            try:
+                loaded = json.loads(up.getvalue().decode("utf-8"))
+                st.session_state.progress = {
+                    "name": user,
+                    "history": dict(loaded.get("history", {})),
+                    "wrong": dict(loaded.get("wrong", {})),
+                }
+                save_progress()
+                st.success(f"已還原 {len(st.session_state.progress['wrong'])} 個錯題字")
+            except Exception as e:  # noqa: BLE001
+                st.error(f"檔案格式不對：{e}")
 
     return {"df": df, "mode": mode, "n": n, "kinds": sorted(kinds), "hint": hint,
-            "error": err, "source": source_label,
+            "error": err, "source": source_label, "user": user,
             "audio": audio, "accent": accent, "autoplay": autoplay, "slow": slow}
 
 
@@ -680,7 +795,7 @@ def quiz_signature(cfg: dict) -> str:
     df = cfg["df"]
     fingerprint = f"{len(df)}:{'|'.join(df['word'].head(20).tolist())}"
     parts = [cfg["mode"], str(cfg["n"]), ",".join(cfg["kinds"]), fingerprint,
-             str(st.session_state.get("salt", 0))]
+             current_user(), str(st.session_state.get("salt", 0))]
     if cfg["mode"] == "daily":
         parts.append(dt.date.today().isoformat())
     return "|".join(parts)
