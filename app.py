@@ -131,6 +131,7 @@ st.markdown(
       }
       .q-prompt {font-size: 1.6rem; font-weight: 700; line-height: 1.5; margin: .25rem 0 .35rem;}
       .q-sent {font-size: 1.18rem; line-height: 1.8; margin: .35rem 0;}
+      .q-zh {font-size: 1rem; opacity: .78; line-height: 1.7; margin: .1rem 0 .45rem;}
       .q-meta {font-size: .9rem; opacity: .7;}
       .opt-row {font-size: 1.02rem; padding: .6rem .85rem; border-radius: 10px;
                 margin-bottom: .4rem; border: 1px solid rgba(128,128,128,.25);}
@@ -726,7 +727,8 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
             return None
         q["sentence"], q["surface"] = blanked
         if kind == "spell":
-            q.update(prompt="把空格填回原本的單字（詞形不限）", answer=q["surface"])
+            q.update(prompt="依中文意思，把空格填回原本的單字（詞形不限）",
+                     answer=q["surface"])
             return q
         opts = pick_distractors(pool, row, "word", rng, 3)
         if len(opts) < 3:
@@ -1088,7 +1090,14 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
     if cfg["hint"] and q["pos"]:
         pills += f"<span class='pill'>{esc(q['pos'])}</span>"
 
-    if q["kind"] in ("cloze", "spell"):
+    if q["kind"] == "spell":
+        # 拼字題沒有選項，只給英文句等於要你憑空猜；附上中文才知道要填哪個字。
+        # 四選一的填空題不能給，中譯會直接洩答案。
+        zh = q["example_zh"] or q["meaning"]
+        body = (f"{pills}<div class='q-sent'>{esc(q['sentence'])}</div>"
+                + (f"<div class='q-zh'>{esc(zh)}</div>" if zh else "")
+                + f"<div class='q-meta'>{esc(q['prompt'])}</div>")
+    elif q["kind"] == "cloze":
         body = (f"{pills}<div class='q-sent'>{esc(q['sentence'])}</div>"
                 f"<div class='q-meta'>{esc(q['prompt'])}</div>")
     else:
