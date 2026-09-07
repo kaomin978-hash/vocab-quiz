@@ -22,6 +22,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import html
 import io
 import json
 import random
@@ -75,6 +76,12 @@ MODES = {
 
 BLANK = "＿＿＿＿＿"
 
+
+def esc(text) -> str:
+    """單字庫內容是使用者自己填的，插進 HTML 前一律轉義。"""
+    return html.escape(str(text), quote=False)
+
+
 st.set_page_config(page_title=APP_TITLE, page_icon="📘", layout="centered",
                    initial_sidebar_state="collapsed")
 
@@ -103,6 +110,8 @@ st.markdown(
       .q-meta {font-size: .9rem; opacity: .7;}
       .opt-row {font-size: 1.02rem; padding: .6rem .85rem; border-radius: 10px;
                 margin-bottom: .4rem; border: 1px solid rgba(128,128,128,.25);}
+      .opt-gloss {font-size: .9rem; opacity: .72; margin-left: .45rem;}
+      .opt-mark {font-size: .86rem; opacity: .85; margin-left: .35rem; white-space: nowrap;}
       .opt-ok {background: rgba(33,195,84,.16); border-color: rgba(33,195,84,.5);}
       .opt-ng {background: rgba(255,75,75,.14); border-color: rgba(255,75,75,.45);}
       .pill {display:inline-block; padding:.14rem .6rem; border-radius:999px;
@@ -327,6 +336,13 @@ def study_streak() -> int:
 # --------------------------------------------------------------------------
 # 出題邏輯
 # --------------------------------------------------------------------------
+def build_option_meta(pool: pd.DataFrame, row: pd.Series, field: str, options: list) -> dict:
+    """選項文字 → (英文單字, 中文意思)，讓答題後每個選項都能顯示釋義。"""
+    lookup = dict(zip(pool[field].str.strip(), zip(pool["word"], pool["meaning"])))
+    lookup[str(row[field]).strip()] = (row["word"], row["meaning"])
+    return {o: list(lookup.get(o, ("", ""))) for o in options}
+
+
 def pick_distractors(pool: pd.DataFrame, row: pd.Series, field: str,
                      rng: random.Random, k: int = 3) -> list:
     """干擾選項：優先同詞性 → 同標籤 → 全庫隨機，且不與正解重複。"""
@@ -398,7 +414,8 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
             return None
         options = opts + [row["word"]]
         rng.shuffle(options)
-        q.update(prompt="選出最適合填入空格的字", answer=row["word"], options=options)
+        q.update(prompt="選出最適合填入空格的字", answer=row["word"], options=options,
+                 option_meta=build_option_meta(pool, row, "word", options))
         return q
 
     if kind == "en2zh":
@@ -408,7 +425,8 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
         options = opts + [row["meaning"]]
         rng.shuffle(options)
         q.update(prompt=row["word"], sub="這個字的意思是？",
-                 answer=row["meaning"], options=options)
+                 answer=row["meaning"], options=options,
+                 option_meta=build_option_meta(pool, row, "meaning", options))
         return q
 
     if kind == "zh2en":
@@ -418,7 +436,8 @@ def make_question(pool: pd.DataFrame, row: pd.Series, kind: str, rng: random.Ran
         options = opts + [row["word"]]
         rng.shuffle(options)
         q.update(prompt=row["meaning"], sub="對應的英文單字是？",
-                 answer=row["word"], options=options)
+                 answer=row["word"], options=options,
+                 option_meta=build_option_meta(pool, row, "word", options))
         return q
     return None
 
@@ -611,9 +630,11 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
         pills += f"<span class='pill'>{q['pos']}</span>"
 
     if q["kind"] in ("cloze", "spell"):
-        body = f"{pills}<div class='q-sent'>{q['sentence']}</div><div class='q-meta'>{q['prompt']}</div>"
+        body = (f"{pills}<div class='q-sent'>{esc(q['sentence'])}</div>"
+                f"<div class='q-meta'>{esc(q['prompt'])}</div>")
     else:
-        body = f"{pills}<div class='q-prompt'>{q['prompt']}</div><div class='q-meta'>{q['sub']}</div>"
+        body = (f"{pills}<div class='q-prompt'>{esc(q['prompt'])}</div>"
+                f"<div class='q-meta'>{esc(q['sub'])}</div>")
     st.markdown(f"<div class='q-card'>{body}</div>", unsafe_allow_html=True)
 
     answered = idx in st.session_state.answers
@@ -635,13 +656,23 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
                 st.rerun()
     else:
         user = st.session_state.answers[idx]["user"]
+        meta = q.get("option_meta", {})
         for opt in q["options"]:
             cls, mark = "opt-row", ""
             if opt == q["answer"]:
-                cls, mark = cls + " opt-ok", "　✅"
+                cls, mark = cls + " opt-ok", "✅"
             elif opt == user:
-                cls, mark = cls + " opt-ng", "　❌ 你的選擇"
-            st.markdown(f"<div class='{cls}'>{opt}{mark}</div>", unsafe_allow_html=True)
+                cls, mark = cls + " opt-ng", "❌ 你選的"
+            # 每個選項都補上釋義：中文選項配英文字，英文選項配中文意思
+            word, meaning = meta.get(opt, ("", ""))
+            gloss = word if q["kind"] == "en2zh" else meaning
+            st.markdown(
+                f"<div class='{cls}'>{esc(opt)}"
+                + (f"<span class='opt-gloss'>{esc(gloss)}</span>" if gloss else "")
+                + (f"<span class='opt-mark'>{mark}</span>" if mark else "")
+                + "</div>",
+                unsafe_allow_html=True,
+            )
 
     if answered:
         res = st.session_state.answers[idx]
