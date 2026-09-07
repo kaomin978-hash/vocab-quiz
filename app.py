@@ -429,7 +429,7 @@ def _db_call(method: str, path: str, *, params=None, json_body=None, prefer=None
     order = ([remembered] + [i for i in (0, 1) if i != remembered]
              if remembered in (0, 1) else [0, 1])
 
-    last = None
+    last, detail = None, None
     for i in order:
         headers = dict(variants[i])
         if prefer:
@@ -437,15 +437,39 @@ def _db_call(method: str, path: str, *, params=None, json_body=None, prefer=None
         try:
             r = requests.request(method, f"{url}/rest/v1/{path}", headers=headers,
                                  params=params, json=json_body, timeout=10)
-            if r.status_code in (401, 403):     # 換另一種標頭再試
-                last = RuntimeError(f"HTTP {r.status_code}")
-                continue
-            r.raise_for_status()
+            if not r.ok:
+                detail = f"HTTP {r.status_code} — {r.text[:200]}"
+                if r.status_code in (401, 403):     # 換另一種標頭再試
+                    last = RuntimeError(detail)
+                    continue
+                r.raise_for_status()
             st.session_state.db_hdr = i
+            st.session_state.pop("db_error", None)
             return r
         except Exception as e:  # noqa: BLE001
+            detail = detail or f"{type(e).__name__}：{e}"
             last = e
+    st.session_state.db_error = detail or "未知錯誤"
     raise last or RuntimeError("request failed")
+
+
+def db_error_hint(err: str) -> str:
+    """把 PostgREST 的錯誤翻成「該怎麼修」。"""
+    e = str(err).lower()
+    if "does not exist" in e or "pgrst205" in e or "404" in e:
+        return ("資料表還沒建立。到 Supabase 左側 **SQL Editor** 貼上 README 裡那段 "
+                "`create table vocab_progress …` 並按 Run。")
+    # RLS 也是回 403，要先判斷，否則會被下面的金鑰檢查攔走
+    if "row-level security" in e or "42501" in e:
+        return ("資料表有開 RLS 但沒有存取政策。到 SQL Editor 執行 "
+                "`create policy \"app access\" on vocab_progress for all "
+                "using (true) with check (true);`")
+    if "401" in e or "403" in e or "invalid api key" in e or "jwt" in e:
+        return ("金鑰不正確。請用 Settings → API Keys 的 **Publishable key**"
+                "（`sb_publishable_…`），不要用 Secret key。")
+    if "connection" in e or "name or service" in e or "timeout" in e or "max retries" in e:
+        return "連不上這個網址。確認 Project URL 是 `https://xxxxx.supabase.co`，結尾不要多加路徑。"
+    return "把這段錯誤訊息貼給我，我幫你判斷。"
 
 
 def db_load(user: str):
@@ -870,6 +894,32 @@ def sidebar() -> dict:
         "local": "📁 紀錄存在伺服器暫存檔，重新部署或休眠後會清空",
         "error": "⚠️ 雲端資料庫寫入失敗，目前只存在暫存檔",
     }[storage])
+
+    if storage != "cloud":
+        with st.sidebar.expander("🔧 雲端儲存診斷"):
+            conf = supabase_conf()
+            if not conf:
+                st.write("**沒有讀到 `[supabase]` 設定**")
+                try:
+                    blocks = [k for k in st.secrets.keys()]
+                except Exception:
+                    blocks = []
+                st.caption(f"目前 secrets 讀到的區塊：{blocks or '（空的）'}")
+                st.caption("到 Manage app → ⋮ → Settings → Secrets，確認有 `[supabase]` "
+                           "這一行標頭，下面兩行分別是 `url =` 與 `key =`，值都要用雙引號括起來。")
+            else:
+                st.write(f"Project URL：`{conf[0]}`")
+                st.write(f"金鑰：`{conf[1][:18]}…`（共 {len(conf[1])} 字）")
+                err = st.session_state.get("db_error")
+                if err:
+                    st.error(err)
+                    st.info(db_error_hint(err))
+                else:
+                    st.caption("設定讀到了，尚未發生錯誤 —— 作答一題後再看這裡。")
+            if st.button("🔄 重新測試連線", use_container_width=True):
+                for k in ("db_error", "db_hdr", "progress", "progress_user"):
+                    st.session_state.pop(k, None)
+                st.rerun()
 
     with st.sidebar.expander("💾 備份／還原學習紀錄"):
         st.caption("換裝置或想留存時可下載一份；還原會覆蓋目前紀錄。")
