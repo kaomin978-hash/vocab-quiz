@@ -1,0 +1,6 @@
+progress.json
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+.venv/
+wrong_*.csv
