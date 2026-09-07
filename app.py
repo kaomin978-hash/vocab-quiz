@@ -51,7 +51,9 @@ COLUMN_ALIASES = {
     "pos": ["pos", "詞性", "partofspeech", "part_of_speech"],
     "example": ["example", "例句", "英文例句", "sentence", "examplesentence", "用法"],
     "example_zh": ["example_zh", "例句翻譯", "例句中文", "中文例句", "sentence_zh"],
-    "note": ["note", "notes", "備註", "註記", "說明", "筆記", "remark", "熟詞偏義", "陷阱"],
+    # 「標籤 / 備註」這種合成欄先歸到 note，再由 split_tag_prefix() 把【】裡的標籤拆出來
+    "note": ["note", "notes", "備註", "註記", "說明", "筆記", "remark", "熟詞偏義", "陷阱",
+             "標籤備註", "備註標籤", "標籤說明", "分類備註"],
     "tags": ["tags", "tag", "標籤", "分類", "類別", "category", "主題", "level", "程度"],
 }
 TRICKY_KEYWORDS = ("熟詞偏義", "偏義", "陷阱", "tricky", "trap")
@@ -116,13 +118,23 @@ st.markdown(
 # 資料讀取與正規化
 # --------------------------------------------------------------------------
 def _canon(name) -> str:
-    return re.sub(r"[\s_\-()（）]", "", str(name)).strip().lower()
+    return re.sub(r"[\s_\-()（）/／、,，]", "", str(name)).strip().lower()
 
 
 ALIAS_LOOKUP = {_canon(a): canon for canon, alist in COLUMN_ALIASES.items() for a in alist}
 
 CJK_RE = re.compile(r"[㐀-鿿]")
 TAIL_PAREN_RE = re.compile(r"[（(]([^（()）]*)[)）]\s*$")
+TAG_PREFIX_RE = re.compile(r"^[【\[［]([^】\]］]{1,16})[】\]］]\s*")
+
+
+def split_tag_prefix(note: str):
+    """把「【熟詞偏義】常見意思是…」拆成 (標籤, 說明)。沒有前綴就回傳 ("", 原文)。"""
+    s = str(note).strip()
+    m = TAG_PREFIX_RE.match(s)
+    if not m:
+        return "", s
+    return m.group(1).strip(), s[m.end():].strip()
 
 
 def split_bilingual(sentence: str):
@@ -179,6 +191,12 @@ def normalize_frame(raw: pd.DataFrame) -> pd.DataFrame:
     df["example"] = [en for en, _ in split]
     df["example_zh"] = [zh if zh and not old else old
                         for (_, zh), old in zip(split, df["example_zh"])]
+
+    # 備註開頭若有【標籤】，拆成標籤欄；已有標籤者不動
+    tagged = df["note"].apply(split_tag_prefix)
+    df["tags"] = [tag if tag and not old else old
+                  for (tag, _), old in zip(tagged, df["tags"])]
+    df["note"] = [body for _, body in tagged]
     df["tricky"] = (df["tags"] + " " + df["note"]).str.lower().apply(
         lambda s: any(k.lower() in s for k in TRICKY_KEYWORDS)
     )
@@ -574,10 +592,13 @@ def render_details(q: dict) -> None:
         st.markdown(f"📖 {sent}")
     if q["example_zh"]:
         st.caption(q["example_zh"])
-    if q["note"]:
-        (st.warning if q["tricky"] else st.info)(
-            ("⚠️ 熟詞偏義：" if q["tricky"] else "💡 ") + q["note"]
-        )
+    if q["note"] or q["tags"]:
+        if q["tricky"]:
+            st.warning(f"⚠️ 熟詞偏義：{q['note']}")
+        elif q["tags"]:
+            st.info(f"💡 【{q['tags']}】{q['note']}")
+        else:
+            st.info(f"💡 {q['note']}")
 
 
 def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
