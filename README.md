@@ -199,9 +199,13 @@ https://你的app.streamlit.app/?u=小明
 
 ```toml
 [supabase]
-url = "https://xxxxx.supabase.co"
-key = "你的 anon public key"
+url = "https://xxxxx.supabase.co"        # Settings → Data API → Project URL
+key = "sb_publishable_xxxxxxxx"          # Settings → API Keys → Publishable key
 ```
+
+新版的 **Publishable key**（`sb_publishable_…`）與舊版的 **anon public**（`eyJ…`）都支援：
+前者不是 JWT，某些設定下不能放進 `Authorization` 標頭，程式會自動判斷該用哪種標頭。
+**不要用 Secret key（`sb_secret_…`）或 service_role**，那是後端專用的高權限金鑰。
 
 資料表用這段 SQL 建立（Supabase → SQL Editor）：
 

@@ -413,55 +413,71 @@ def supabase_conf():
     return None
 
 
-def _db_headers(key: str) -> dict:
-    return {"apikey": key, "Authorization": f"Bearer {key}",
-            "Content-Type": "application/json"}
+def _db_call(method: str, path: str, *, params=None, json_body=None, prefer=None):
+    """對 PostgREST 發一次請求。
+
+    新版金鑰（sb_publishable_…）不是 JWT，某些設定下塞進 Authorization 會被判為
+    無效 token；舊版 anon key（eyJ…）則習慣帶 Bearer。兩種標頭都試，
+    哪一種成功就記住，之後直接用。
+    """
+    url, key = supabase_conf()
+    plain = {"apikey": key, "Content-Type": "application/json"}
+    bearer = {**plain, "Authorization": f"Bearer {key}"}
+    variants = [plain, bearer] if key.startswith("sb_") else [bearer, plain]
+
+    remembered = st.session_state.get("db_hdr")
+    order = ([remembered] + [i for i in (0, 1) if i != remembered]
+             if remembered in (0, 1) else [0, 1])
+
+    last = None
+    for i in order:
+        headers = dict(variants[i])
+        if prefer:
+            headers["Prefer"] = prefer
+        try:
+            r = requests.request(method, f"{url}/rest/v1/{path}", headers=headers,
+                                 params=params, json=json_body, timeout=10)
+            if r.status_code in (401, 403):     # 換另一種標頭再試
+                last = RuntimeError(f"HTTP {r.status_code}")
+                continue
+            r.raise_for_status()
+            st.session_state.db_hdr = i
+            return r
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise last or RuntimeError("request failed")
 
 
 def db_load(user: str):
     """讀取雲端紀錄。沒設定或讀取失敗回傳 None，呼叫端會退回本機檔案。"""
-    conf = supabase_conf()
-    if not conf:
+    if not supabase_conf():
         return None
-    url, key = conf
     try:
-        r = requests.get(f"{url}/rest/v1/{DB_TABLE}",
-                         params={"username": f"eq.{user}", "select": "data"},
-                         headers=_db_headers(key), timeout=10)
-        r.raise_for_status()
-        rows = r.json()
+        rows = _db_call("GET", DB_TABLE,
+                        params={"username": f"eq.{user}", "select": "data"}).json()
         return dict(rows[0]["data"]) if rows else {}
     except Exception:  # noqa: BLE001
         return None
 
 
 def db_save(user: str, data: dict) -> bool:
-    conf = supabase_conf()
-    if not conf:
+    if not supabase_conf():
         return False
-    url, key = conf
     try:
-        r = requests.post(
-            f"{url}/rest/v1/{DB_TABLE}", params={"on_conflict": "username"},
-            headers={**_db_headers(key), "Prefer": "resolution=merge-duplicates"},
-            json={"username": user, "data": data}, timeout=10,
-        )
-        r.raise_for_status()
+        _db_call("POST", DB_TABLE, params={"on_conflict": "username"},
+                 json_body={"username": user, "data": data},
+                 prefer="resolution=merge-duplicates")
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
 def db_users() -> list:
-    conf = supabase_conf()
-    if not conf:
+    if not supabase_conf():
         return []
-    url, key = conf
     try:
-        r = requests.get(f"{url}/rest/v1/{DB_TABLE}", params={"select": "username"},
-                         headers=_db_headers(key), timeout=10)
-        r.raise_for_status()
-        return [str(row["username"]) for row in r.json() if row.get("username")]
+        rows = _db_call("GET", DB_TABLE, params={"select": "username"}).json()
+        return [str(row["username"]) for row in rows if row.get("username")]
     except Exception:  # noqa: BLE001
         return []
 
