@@ -407,6 +407,9 @@ def supabase_conf():
         if conf:
             url, key = str(conf.get("url", "")).strip(), str(conf.get("key", "")).strip()
             if url and key:
+                # Supabase 的 Connect 視窗顯示的是含 /rest/v1 的 REST endpoint，
+                # 直接貼進來會變成 .../rest/v1/rest/v1/... 而被閘道以 401 擋掉
+                url = re.sub(r"/rest/v\d+/?$", "", url.rstrip("/"))
                 return url.rstrip("/"), key
     except Exception:
         pass
@@ -465,8 +468,10 @@ def db_error_hint(err: str) -> str:
                 "`create policy \"app access\" on vocab_progress for all "
                 "using (true) with check (true);`")
     if "401" in e or "403" in e or "invalid api key" in e or "jwt" in e:
-        return ("金鑰不正確。請用 Settings → API Keys 的 **Publishable key**"
-                "（`sb_publishable_…`），不要用 Secret key。")
+        return ("金鑰不正確，或 Project URL 多帶了路徑。URL 只要 "
+                "`https://xxxxx.supabase.co`；金鑰請用 Settings → API Keys 的 "
+                "**Publishable key**（`sb_publishable_…`，注意要按複製鈕取得完整內容，"
+                "畫面上顯示的是截斷版），不要用 Secret key。")
     if "connection" in e or "name or service" in e or "timeout" in e or "max retries" in e:
         return "連不上這個網址。確認 Project URL 是 `https://xxxxx.supabase.co`，結尾不要多加路徑。"
     return "把這段錯誤訊息貼給我，我幫你判斷。"

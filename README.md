@@ -200,6 +200,7 @@ https://你的app.streamlit.app/?u=小明
 ```toml
 [supabase]
 url = "https://xxxxx.supabase.co"        # Settings → Data API → Project URL
+                                         # 結尾若帶 /rest/v1 會自動去掉
 key = "sb_publishable_xxxxxxxx"          # Settings → API Keys → Publishable key
 ```
 
