@@ -192,6 +192,9 @@ def normalize_frame(raw: pd.DataFrame) -> pd.DataFrame:
     for col in CANON_COLUMNS:
         df[col] = df[col].fillna("").astype(str).str.strip()
 
+    # 詞性可能寫成 "(n.)"，去掉外層括號，顯示時才不會變成「（(n.)）」
+    df["pos"] = df["pos"].str.strip().str.strip("()（）").str.strip()
+
     df = df[(df["word"] != "") & (df["meaning"] != "")]
     df = df.drop_duplicates(subset=["word"], keep="first").reset_index(drop=True)
 
@@ -678,8 +681,10 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
         res = st.session_state.answers[idx]
         if res["ok"]:
             st.success(f"答對了！**{q['word']}**（{q['pos'] or '—'}）{q['meaning']}")
-        else:
-            st.error(f"正解：**{q['answer']}**　—　**{q['word']}** {q['meaning']}")
+        elif q["answer"] == q["word"]:          # 選項就是單字本身，不必再重複一次
+            st.error(f"正解：**{q['word']}**（{q['pos'] or '—'}）{q['meaning']}")
+        else:                                    # 英→中：正解是中文，補上對應的英文字
+            st.error(f"正解：**{q['answer']}**　—　**{q['word']}**（{q['pos'] or '—'}）")
         render_details(q)
         label = "下一題 ▶" if idx + 1 < total else "看結果 🎉"
         if st.button(label, type="primary", use_container_width=True, key=f"next_{idx}"):
