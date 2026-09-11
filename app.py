@@ -21,6 +21,7 @@
 """
 from __future__ import annotations
 
+import base64
 import datetime as dt
 import html
 import io
@@ -134,7 +135,13 @@ st.markdown(
       .q-zh {font-size: 1rem; opacity: .78; line-height: 1.7; margin: .1rem 0 .45rem;}
       .q-meta {font-size: .9rem; opacity: .7;}
       .opt-row {font-size: 1.02rem; padding: .6rem .85rem; border-radius: 10px;
-                margin-bottom: .4rem; border: 1px solid rgba(128,128,128,.25);}
+                margin-bottom: .4rem; border: 1px solid rgba(128,128,128,.25);
+                display: flex; align-items: center; gap: .6rem; line-height: 1.45;}
+      .opt-text {flex: 1; min-width: 0;}
+      .opt-play {flex: none; width: 2.5rem; height: 2.5rem; border-radius: 999px;
+                 border: 1px solid rgba(128,128,128,.35); background: rgba(255,255,255,.85);
+                 font-size: 1.1rem; line-height: 1; cursor: pointer; padding: 0;}
+      .opt-play:active {transform: scale(.94);}
       .opt-gloss {font-size: .9rem; opacity: .72; margin-left: .45rem;}
       .opt-mark {font-size: .86rem; opacity: .85; margin-left: .35rem; white-space: nowrap;}
       .opt-ok {background: rgba(33,195,84,.16); border-color: rgba(33,195,84,.5);}
@@ -1027,6 +1034,67 @@ def submit(idx: int, q: dict, user: str) -> None:
 # --------------------------------------------------------------------------
 # 畫面
 # --------------------------------------------------------------------------
+OPTION_PLAY_JS = """
+<script>
+(() => {
+  const root = document.getElementById("__ROOT__");
+  if (!root || root.dataset.bound) return;
+  root.dataset.bound = "1";
+  let current = null;
+  root.querySelectorAll(".opt-play").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (current) current.pause();          // 連點不同選項時不要疊音
+      current = new Audio(btn.dataset.src);
+      current.play().catch(() => {});
+    });
+  });
+})();
+</script>
+"""
+
+
+def render_answered_options(q: dict, cfg: dict, idx: int, user_pick: str) -> None:
+    """答完後的四個選項：標出對錯、附釋義，並在每列右側放一顆 🔊 播放該英文字。"""
+    meta = q.get("option_meta", {})
+    tld = ACCENT_TLD.get(cfg["accent"], "com")
+    root_id = f"opts-{idx}-{st.session_state.get('salt', 0)}"
+
+    rows, has_audio = [], False
+    for opt in q["options"]:
+        cls, mark = "opt-row", ""
+        if opt == q["answer"]:
+            cls, mark = cls + " opt-ok", "✅"
+        elif opt == user_pick:
+            cls, mark = cls + " opt-ng", "❌ 你選的"
+        # 每個選項都補上釋義：中文選項配英文字，英文選項配中文意思
+        word, meaning = meta.get(opt, ("", ""))
+        gloss = word if q["kind"] == "en2zh" else meaning
+
+        button = ""
+        if cfg["audio"] and word:
+            mp3 = tts_mp3(word, tld)
+            if mp3:
+                has_audio = True
+                src = "data:audio/mpeg;base64," + base64.b64encode(mp3).decode("ascii")
+                label = html.escape(f"播放 {word}", quote=True)
+                button = (f"<button type='button' class='opt-play' aria-label='{label}' "
+                          f"title='{label}' data-src='{src}'>🔊</button>")
+
+        rows.append(
+            f"<div class='{cls}'><div class='opt-text'>{esc(opt)}"
+            + (f"<span class='opt-gloss'>{esc(gloss)}</span>" if gloss else "")
+            + (f"<span class='opt-mark'>{mark}</span>" if mark else "")
+            + f"</div>{button}</div>"
+        )
+
+    body = f"<div id='{root_id}' class='opt-list'>{''.join(rows)}</div>"
+    if has_audio:
+        st.html(body + OPTION_PLAY_JS.replace("__ROOT__", root_id),
+                unsafe_allow_javascript=True)
+    else:
+        st.html(body)
+
+
 def render_audio(q: dict, cfg: dict) -> None:
     """答完後播放單字與例句。慢速版另給一顆，適合跟讀。"""
     if not cfg["audio"]:
@@ -1121,24 +1189,7 @@ def render_question(cfg: dict, q: dict, idx: int, total: int) -> None:
                 submit(idx, q, opt)
                 st.rerun()
     else:
-        user = st.session_state.answers[idx]["user"]
-        meta = q.get("option_meta", {})
-        for opt in q["options"]:
-            cls, mark = "opt-row", ""
-            if opt == q["answer"]:
-                cls, mark = cls + " opt-ok", "✅"
-            elif opt == user:
-                cls, mark = cls + " opt-ng", "❌ 你選的"
-            # 每個選項都補上釋義：中文選項配英文字，英文選項配中文意思
-            word, meaning = meta.get(opt, ("", ""))
-            gloss = word if q["kind"] == "en2zh" else meaning
-            st.markdown(
-                f"<div class='{cls}'>{esc(opt)}"
-                + (f"<span class='opt-gloss'>{esc(gloss)}</span>" if gloss else "")
-                + (f"<span class='opt-mark'>{mark}</span>" if mark else "")
-                + "</div>",
-                unsafe_allow_html=True,
-            )
+        render_answered_options(q, cfg, idx, st.session_state.answers[idx]["user"])
 
     if answered:
         res = st.session_state.answers[idx]
