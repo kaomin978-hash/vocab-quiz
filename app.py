@@ -87,6 +87,19 @@ MODES = {
 
 BLANK = "＿＿＿＿＿"
 
+# Streamlit Cloud 的容器跑 UTC，直接用 date.today() 會讓「今天」在台灣時間
+# 早上 8 點才換日 —— 早上刷題會拿到昨天那一整組題目。台灣沒有日光節約，
+# 固定 +8 即可，不必依賴 tzdata。
+LOCAL_TZ = dt.timezone(dt.timedelta(hours=8))
+
+
+def today() -> dt.date:
+    return dt.datetime.now(LOCAL_TZ).date()
+
+
+def today_str() -> str:
+    return today().isoformat()
+
 
 def esc(text) -> str:
     """單字庫內容是使用者自己填的，插進 HTML 前一律轉義。"""
@@ -581,7 +594,7 @@ def load_progress() -> dict:
     if st.session_state.get("progress_user") == user and "progress" in st.session_state:
         return st.session_state.progress
 
-    data, loaded = {"name": user, "history": {}, "wrong": {}}, None
+    data, loaded = {"name": user, "history": {}, "wrong": {}, "seen": {}, "daily": {}}, None
 
     remote = db_load(user)                 # 有設定 Supabase 就以雲端為準
     if remote is not None:
@@ -599,7 +612,9 @@ def load_progress() -> dict:
     if loaded:
         data = {"name": loaded.get("name", user),
                 "history": dict(loaded.get("history", {})),
-                "wrong": dict(loaded.get("wrong", {}))}
+                "wrong": dict(loaded.get("wrong", {})),
+                "seen": dict(loaded.get("seen", {})),
+                "daily": dict(loaded.get("daily", {}))}
     st.session_state.progress = data
     st.session_state.progress_user = user
     return data
@@ -621,10 +636,15 @@ def save_progress() -> None:
 
 def record_result(word: str, ok: bool) -> None:
     prog = load_progress()
-    today = dt.date.today().isoformat()
-    day = prog["history"].setdefault(today, {"total": 0, "correct": 0})
+    today_iso = today_str()
+    day = prog["history"].setdefault(today_iso, {"total": 0, "correct": 0})
     day["total"] += 1
     day["correct"] += int(ok)
+
+    # 練過的字：用來輪替出題，避免有些字一直被抽到、有些永遠輪不到
+    seen = prog["seen"].setdefault(word, {"count": 0})
+    seen["count"] = seen.get("count", 0) + 1
+    seen["last"] = today_iso
 
     entry = prog["wrong"].get(word)
     if ok:
@@ -636,7 +656,7 @@ def record_result(word: str, ok: bool) -> None:
         entry = entry or {"count": 0}
         entry["count"] = entry.get("count", 0) + 1
         entry["streak"] = 0
-        entry["last"] = today
+        entry["last"] = today_iso
         prog["wrong"][word] = entry
     save_progress()
 
@@ -646,10 +666,9 @@ def study_streak() -> int:
     days = {d for d, v in prog["history"].items() if v.get("total", 0) > 0}
     if not days:
         return 0
-    today = dt.date.today()
-    cur = today
-    if today.isoformat() not in days:
-        cur = today - dt.timedelta(days=1)
+    cur = today()
+    if cur.isoformat() not in days:
+        cur -= dt.timedelta(days=1)
         if cur.isoformat() not in days:
             return 0
     n = 0
@@ -894,13 +913,14 @@ def sidebar() -> dict:
 
     st.sidebar.divider()
     prog = load_progress()
-    today = prog["history"].get(dt.date.today().isoformat(), {"total": 0, "correct": 0})
+    today = prog["history"].get(today_str(), {"total": 0, "correct": 0})
     c1, c2, c3 = st.sidebar.columns(3)
     c1.metric("今日作答", today["total"])
     c2.metric("今日答對", today["correct"])
     c3.metric("連續天數", study_streak())
+    practiced = sum(1 for w in df["word"] if w in prog.get("seen", {}))
     st.sidebar.caption(f"👤 {user}　｜　單字庫 {len(df)} 字（{source_label}）"
-                       f"　｜　錯題本 {len(prog['wrong'])} 字")
+                       f"　｜　已練 {practiced} 字　｜　錯題本 {len(prog['wrong'])} 字")
 
     storage = st.session_state.get("storage", "local")
     st.sidebar.caption({
@@ -951,6 +971,7 @@ def sidebar() -> dict:
                     "name": user,
                     "history": dict(loaded.get("history", {})),
                     "wrong": dict(loaded.get("wrong", {})),
+                    "seen": dict(loaded.get("seen", {})),
                 }
                 save_progress()
                 st.success(f"已還原 {len(st.session_state.progress['wrong'])} 個錯題字")
@@ -971,15 +992,55 @@ def quiz_signature(cfg: dict) -> str:
     parts = [cfg["mode"], str(cfg["n"]), ",".join(cfg["kinds"]), fingerprint,
              current_user(), str(st.session_state.get("salt", 0))]
     if cfg["mode"] == "daily":
-        parts.append(dt.date.today().isoformat())
+        parts.append(today_str())
     return "|".join(parts)
 
 
-def build_questions(cfg: dict, pool: pd.DataFrame, rng: random.Random) -> list:
+def coverage_order(pool: pd.DataFrame, rng: random.Random) -> list:
+    """決定抽題順序：**沒練過的排最前面**，再來是最久沒練的，同組內隨機。
+
+    純隨機抽的話，145 個字抽 14 天會有 47 個字一次都沒出現，
+    同時有些字被抽到三四次 —— 這就是「有些單字根本練不到」的原因。
+    """
+    try:
+        seen = load_progress().get("seen", {})
+    except Exception:          # 在 Streamlit runtime 之外（測試）也要能用
+        seen = {}
+    ranked = []
+    for idx in pool.index:
+        rec = seen.get(pool.at[idx, "word"]) or {}
+        # 練過次數少的優先 → 同次數比誰比較久沒練（沒練過的 last 是空字串，排最前）
+        ranked.append((rec.get("count", 0), str(rec.get("last", "")), rng.random(), idx))
+    ranked.sort(key=lambda t: t[:3])
+    return [t[3] for t in ranked]
+
+
+def daily_word_plan(cfg: dict, pool: pd.DataFrame, rng: random.Random, sig: str) -> list:
+    """每日精選當天的字存進紀錄，重開 App 或換裝置都拿到同一批。
+
+    輪替順序會隨著「練過哪些字」改變，若每次重建都重算，
+    同一天答完幾題再重開就會換一批，違反「同一天題目固定」。
+    """
+    prog = load_progress()
+    plan = prog.get("daily") or {}
+    in_pool = set(pool["word"])
+    if plan.get("date") == today_str() and plan.get("sig") == sig:
+        kept = [w for w in plan.get("words", []) if w in in_pool]
+        if len(kept) >= cfg["n"]:
+            return kept
+    words = [pool.at[i, "word"] for i in coverage_order(pool, rng)]
+    prog["daily"] = {"date": today_str(), "sig": sig,
+                     "words": words[: cfg["n"] * 3]}   # 留餘裕：有些字出不了題會被跳過
+    save_progress()
+    return prog["daily"]["words"]
+
+
+def build_questions(cfg: dict, pool: pd.DataFrame, rng: random.Random,
+                    order: list | None = None) -> list:
     """從 pool 抽題；干擾選項一律取自完整單字庫，順便複習其他字。"""
     full = cfg["df"]
-    order = list(pool.index)
-    rng.shuffle(order)
+    if order is None:
+        order = coverage_order(pool, rng)
     questions = []
     for idx in order:
         if len(questions) >= cfg["n"]:
@@ -1003,11 +1064,16 @@ def ensure_quiz(cfg: dict):
 
     pool, note = filter_by_mode(cfg["df"], cfg["mode"])
     # 每日模式：以日期為亂數種子 → 同一天不論重整幾次，題目都一樣
-    rng = random.Random(f"{dt.date.today().isoformat()}|{sig}") if cfg["mode"] == "daily" \
+    rng = random.Random(f"{today_str()}|{sig}") if cfg["mode"] == "daily" \
         else random.Random()
 
+    order = None
+    if cfg["mode"] == "daily":
+        index_of = {pool.at[i, "word"]: i for i in pool.index}
+        order = [index_of[w] for w in daily_word_plan(cfg, pool, rng, sig) if w in index_of]
+
     st.session_state.sig = sig
-    st.session_state.questions = build_questions(cfg, pool, rng)
+    st.session_state.questions = build_questions(cfg, pool, rng, order)
     st.session_state.answers = {}
     st.session_state.idx = 0
     st.session_state.mode_note = note
@@ -1238,7 +1304,7 @@ def render_result(cfg: dict, questions: list) -> None:
         st.download_button(
             "⬇️ 下載錯題 CSV",
             pd.DataFrame(rows).to_csv(index=False).encode("utf-8-sig"),
-            file_name=f"wrong_{dt.date.today().isoformat()}.csv",
+            file_name=f"wrong_{today_str()}.csv",
             mime="text/csv", use_container_width=True,
         )
     else:
@@ -1272,7 +1338,7 @@ def main() -> None:
         st.dataframe(cfg["df"].head(20), use_container_width=True)
         return
 
-    st.caption(f"{MODES[cfg['mode']]}　·　{dt.date.today():%Y/%m/%d}　·　"
+    st.caption(f"{MODES[cfg['mode']]}　·　{today():%Y/%m/%d}　·　"
                "點左上角箭頭展開設定，可換單字庫與題型")
 
     idx = st.session_state.idx
